@@ -1,0 +1,93 @@
+name: AutoFix AI CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ----------------------------------------------------------------
+  # Backend lint and unit tests
+  # ----------------------------------------------------------------
+  backend-test:
+    name: Backend – Lint & Unit Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: autofix_test
+          POSTGRES_USER: autofix
+          POSTGRES_PASSWORD: autofix_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Lint with ruff
+        run: ruff check app/ tests/
+
+      - name: Run unit tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://autofix:autofix_test@localhost:5432/autofix_test
+          REDIS_URL: redis://localhost:6379/1
+          GITHUB_APP_ID: "12345"
+          GITHUB_APP_PRIVATE_KEY: "placeholder"
+          GITHUB_WEBHOOK_SECRET: "test_secret"
+          ENVIRONMENT: testing
+        run: |
+          pytest tests/unit/ -v --cov=app --cov-report=term-missing
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://autofix:autofix_test@localhost:5432/autofix_test
+          GITHUB_APP_ID: "12345"
+          GITHUB_APP_PRIVATE_KEY: "placeholder"
+          GITHUB_WEBHOOK_SECRET: "test_secret"
+        run: alembic upgrade head
+
+  # ----------------------------------------------------------------
+  # Docker build smoke test
+  # ----------------------------------------------------------------
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: backend-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t autofix-ai-backend:ci ./backend

@@ -1,0 +1,145 @@
+# ------------------------------------------------------------------
+# AutoFix AI – Docker Compose
+#
+# Bring up: docker compose -f infra/docker-compose.yml up
+# ------------------------------------------------------------------
+
+services:
+
+  # ----------------------------------------------------------------
+  # PostgreSQL
+  # ----------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: autofix_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: autofix
+      POSTGRES_USER: autofix
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-autofix_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autofix -d autofix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------
+  # Redis
+  # ----------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: autofix_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------
+  # Backend API
+  # ----------------------------------------------------------------
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: autofix_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://autofix:${POSTGRES_PASSWORD:-autofix_dev_password}@postgres:5432/autofix
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: info
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-placeholder}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-placeholder}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-dev_webhook_secret}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-4o}
+      PROMETHEUS_ENABLED: "true"
+      OTEL_ENABLED: "false"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------------
+  # Database migrations (runs once, then exits)
+  # ----------------------------------------------------------------
+  migrate:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: autofix_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://autofix:${POSTGRES_PASSWORD:-autofix_dev_password}@postgres:5432/autofix
+      REDIS_URL: redis://redis:6379/0
+      GITHUB_APP_ID: placeholder
+      GITHUB_APP_PRIVATE_KEY: placeholder
+      GITHUB_WEBHOOK_SECRET: placeholder
+    entrypoint: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  # ----------------------------------------------------------------
+  # Prometheus
+  # ----------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: autofix_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+
+  # ----------------------------------------------------------------
+  # Grafana
+  # ----------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: autofix_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
